@@ -1,0 +1,1454 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HANA CAR POOL</title>
+  
+  <!-- โหลด Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- โหลด React และ ReactDOM (สำคัญ: ต้องโหลดก่อน Lucide เสมอ) -->
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
+  
+  <!-- FIX: แก้ไขบั๊กของ Lucide ที่หา React แบบพิมพ์ใหญ่ไม่เจอ -->
+  <script>window.react = window.React;</script>
+  
+  <!-- โหลด Babel สำหรับแปลง JSX -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"></script>
+  
+  <!-- โหลด Lucide Icons (เวอร์ชัน 0.284.0 เป็นเวอร์ชันสุดท้ายที่ UMD สมบูรณ์ที่สุด) -->
+  <script src="https://cdn.jsdelivr.net/npm/lucide-react@0.284.0/dist/umd/lucide-react.min.js"></script>
+  
+  <!-- โหลด LINE LIFF SDK -->
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+
+  <style>
+    /* ซ่อน Scrollbar สำหรับความสวยงามบนมือถือ */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 antialiased overflow-x-hidden">
+  <div id="root"></div>
+
+  <!-- เริ่มต้นเขียน React (JSX) ภายในแท็ก Script นี้ -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo } = React;
+    
+    // ตรวจสอบว่า lucideReact ถูกโหลดสำเร็จหรือไม่
+    if (!window.lucideReact) {
+        console.error("Lucide icons failed to load. Please check your internet connection or script tags.");
+    }
+    
+    const { 
+      Bus, Calendar, User, CheckCircle, Clock, MapPin, ShieldCheck, Settings, 
+      Plus, X, Phone, Map: MapIcon, Truck, ClipboardList, UserCheck, 
+      UserMinus, AlertCircle, ArrowRightLeft, ArrowRight, BarChart3, 
+      ExternalLink, Users, LogOut, Navigation, Info, Home, ChevronLeft,
+      LogIn, Search, Car, Trash2, Play, Flag, Building2, LocateFixed,
+      Banknote, History, CalendarSearch, Lock, CopyPlus, Download, Bell, Bike
+    } = window.lucideReact || {}; // ใช้ Fallback ป้องกันเว็บพังถ้าระบบโหลดไอคอนไม่ทัน
+
+    // --- CONFIGURATION ---
+    const SUPABASE_PROJECT_ID = 'xzcwdsvhjkmfiruwyfyd';
+    const SUPABASE_URL = `https://${SUPABASE_PROJECT_ID}.supabase.co/rest/v1`;
+    const SUPABASE_KEY = 'sb_publishable_vfSkphQ-u6BbWPwUY-wJEQ_GyTCtbqX'; 
+
+    // --- DATE HELPERS ---
+    const getTodayDateStr = () => {
+      const d = new Date();
+      d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+      return d.toISOString().split('T')[0];
+    };
+    const getFutureDateStr = (daysAhead) => {
+      const d = new Date();
+      d.setDate(d.getDate() + daysAhead);
+      d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+      return d.toISOString().split('T')[0];
+    };
+
+    const getEndDateStr = (startDateStr, daysAhead) => {
+      if (!startDateStr) return '';
+      const d = new Date(startDateStr);
+      d.setDate(d.getDate() + daysAhead);
+      return d.toISOString().split('T')[0];
+    };
+
+    const getDistance = (lat1, lon1, lat2, lon2) => {
+      if(!lat1 || !lon1 || !lat2 || !lon2) return null;
+      const R = 6371; 
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      return (R * c).toFixed(1);
+    };
+
+    // --- DATA PARSERS ---
+    const parseTripData = (raw) => {
+      if (!raw) return { type: 'round-trip', subText: '', pickup: '' };
+      const parts = raw.split('|');
+      const type = parts[0];
+      let subText = '';
+      let pickup = '';
+      
+      if (parts.length === 3) {
+         subText = parts[1];
+         pickup = parts[2];
+      } else if (parts.length === 2) {
+         if (parts[1] === 'รายสัปดาห์' || parts[1] === 'รายเดือน') subText = parts[1];
+         else pickup = parts[1];
+      }
+      return { type, subText, pickup };
+    };
+
+    const getCarModelParts = (carModelStr) => {
+      const parts = carModelStr?.split('|') || [];
+      return {
+        coords: parts[0] || "0,0",
+        status: parts[1] || "เตรียมรถ",
+        busPackage: parts[2] || "daily",
+        isArchived: parts.includes('Archived')
+      };
+    };
+
+    const getTripTypeText = (type) => {
+      if(type === 'departure-only' || type === 'one-way') return 'ขาไป';
+      if(type === 'return-only') return 'ขากลับ';
+      return 'ไป-กลับ';
+    };
+
+    // --- CUSTOM 3D VEHICLE ICONS (IMAGES) ---
+    // เช็คว่ามีไฟล์รูปไหม ถ้าไม่มีจะเว้นว่างไว้ (บน Server จริงต้องมีไฟล์)
+    const VehicleImageIcon = ({ type, className }) => {
+      let imgSrc = './car.png'; 
+      if (type === 'รถบัส') imgSrc = './bus.png';
+      if (type === 'รถกระบะ') imgSrc = './truck.png';
+      if (type === 'รถตู้') imgSrc = './van.png';
+      
+      return (
+        <img 
+          src={imgSrc} 
+          alt={type} 
+          className={`object-contain ${className}`} 
+          style={{ filter: 'drop-shadow(2px 4px 6px rgba(0,0,0,0.3))' }} 
+          onError={(e) => { e.target.style.display = 'none'; }} // ซ่อนรูปถ้าโหลดไม่ขึ้น
+        />
+      );
+    };
+
+    // Fallback Icons
+    const getVehicleIconComponent = (type) => {
+      if (!window.lucideReact) return () => <span>🚗</span>; // Fallback ถ้า Lucide พัง
+      switch(type) {
+        case 'รถบัส': return Bus || (() => <span>🚌</span>);
+        case 'รถกระบะ': return Truck || (() => <span>🛻</span>);
+        case 'รถตู้': return Bus || (() => <span>🚐</span>);
+        case 'มอเตอร์ไซค์': return Bike || (() => <span>🏍️</span>);
+        default: return Car || (() => <span>🚗</span>); 
+      }
+    };
+
+    // --- GPS HELPER ---
+    const getCurrentGpsPosition = () => {
+      return new Promise((resolve, reject) => {
+        if (!navigator.geolocation) return reject(new Error("เบราว์เซอร์ไม่รองรับ GPS"));
+        navigator.geolocation.getCurrentPosition(
+          (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }),
+          (err) => reject(err),
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+        );
+      });
+    };
+
+    // --- ISOLATED MAP COMPONENT TO PREVENT FLICKERING AND USE CUSTOM PIN ---
+    const RealLiveMap = React.memo(({ rawData, forEmployee = true, vehicleType = 'รถเก๋ง' }) => {
+      const [lat, lng, status] = useMemo(() => {
+        const { coords, status } = getCarModelParts(rawData);
+        const [la, ln] = coords.split(',');
+        return [parseFloat(la) || null, parseFloat(ln) || null, status];
+      }, [rawData]);
+
+      const [myLoc, setMyLoc] = useState(null);
+      const [gpsError, setGpsError] = useState(false);
+
+      useEffect(() => {
+        if (!forEmployee) return;
+        let watchId;
+        if ("geolocation" in navigator) {
+          watchId = navigator.geolocation.watchPosition(
+            (pos) => {
+               const { latitude, longitude, accuracy } = pos.coords;
+               if (accuracy <= 2000) {
+                 setMyLoc({ lat: latitude, lng: longitude });
+                 setGpsError(false);
+               }
+            },
+            (err) => {
+               console.warn("Emp GPS Error", err);
+               setGpsError(true);
+            },
+            { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
+          );
+        }
+        return () => { if (watchId) navigator.geolocation.clearWatch(watchId); };
+      }, [forEmployee]);
+
+      const distance = myLoc && lat && lng ? getDistance(myLoc.lat, myLoc.lng, lat, lng) : null;
+
+      const openGoogleMaps = () => {
+         if (!lat || !lng) return alert("ยังไม่มีข้อมูลพิกัดจากคนขับ");
+         if (myLoc) {
+            window.open(`https://www.google.com/maps/dir/?api=1&origin=${myLoc.lat},${myLoc.lng}&destination=${lat},${lng}`, '_blank');
+         } else {
+            window.open(`https://www.google.com/maps/search/?api=1&query=${lat},${lng}`, '_blank');
+         }
+      };
+
+      const displayLat = lat || 13.7563;
+      const displayLng = lng || 100.5018;
+
+      const mapUrl = useMemo(() => {
+        const latRound = parseFloat(displayLat).toFixed(4);
+        const lngRound = parseFloat(displayLng).toFixed(4);
+        return `https://www.openstreetmap.org/export/embed.html?bbox=${lngRound-0.005}%2C${latRound-0.005}%2C${parseFloat(lngRound)+0.005}%2C${parseFloat(latRound)+0.005}&layer=mapnik`;
+      }, [displayLat, displayLng]);
+
+      return (
+        <div className="mt-4 rounded-[2rem] overflow-hidden border-2 border-slate-200 shadow-xl bg-slate-100 flex flex-col">
+          <div className="h-64 relative">
+            <div className="absolute inset-0 pointer-events-none">
+               <iframe width="100%" height="100%" frameBorder="0" scrolling="no" title="GPS Map" src={mapUrl}></iframe>
+            </div>
+            
+            {/* CUSTOM 3D MARKER - อยู่ตรงกลางจอเสมอ */}
+            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center pointer-events-none z-10 animate-bounce">
+               <div className="bg-white/90 p-2 w-14 h-14 rounded-full shadow-[0_10px_20px_rgba(0,0,0,0.3)] border-4 border-blue-500 flex items-center justify-center overflow-hidden">
+                  <VehicleImageIcon type={vehicleType} className="w-full h-full scale-125" />
+               </div>
+               <div className="w-4 h-2 bg-black/40 rounded-full mt-2 blur-[2px]"></div>
+            </div>
+
+            <div className="absolute top-4 right-4 bg-white/95 backdrop-blur-md p-3 rounded-2xl shadow-xl border border-blue-100 flex items-center gap-3">
+               <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center shadow-inner p-1.5">
+                  <VehicleImageIcon type={vehicleType} className="w-full h-full" />
+               </div>
+               <div>
+                  <p className="text-[10px] font-black text-blue-600 uppercase tracking-widest leading-none">Status</p>
+                  <p className="text-xs font-black text-slate-800 italic">{status}</p>
+               </div>
+            </div>
+          </div>
+
+          {forEmployee && (
+            <div className="p-4 bg-white border-t border-slate-100">
+              <div className="flex justify-between items-center">
+                 <div className="flex flex-col gap-1">
+                   <div className="flex items-center gap-2">
+                     {myLoc ? (
+                       <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-md border border-emerald-100 flex items-center gap-1">
+                         {CheckCircle && <CheckCircle className="w-3 h-3"/>} GPS มือถือทำงาน
+                       </span>
+                     ) : gpsError ? (
+                       <span className="text-[9px] font-bold text-red-600 bg-red-50 px-2 py-1 rounded-md border border-red-100 flex items-center gap-1">
+                         {AlertCircle && <AlertCircle className="w-3 h-3"/>} ไม่ได้รับสิทธิ์ GPS
+                       </span>
+                     ) : (
+                       <span className="text-[9px] font-bold text-amber-600 bg-amber-50 px-2 py-1 rounded-md border border-amber-100 flex items-center gap-1">
+                         {Clock && <Clock className="w-3 h-3 animate-spin"/>} หาพิกัดเครื่องคุณ...
+                       </span>
+                     )}
+                   </div>
+                   {distance && <p className="text-[10px] font-black text-slate-600 mt-1">📍 ระยะห่างจากรถ: <span className="text-blue-600">{distance} กม.</span></p>}
+                 </div>
+                 <button onClick={openGoogleMaps} className="flex items-center gap-2 bg-slate-900 text-white px-3 py-2.5 rounded-xl text-[9px] font-black shadow-lg hover:bg-blue-600 transition-colors uppercase tracking-widest">
+                   {MapIcon && <MapIcon className="w-4 h-4" />} เปิด Google Maps
+                 </button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    });
+
+    const App = () => {
+      const [view, setView] = useState('welcome'); 
+      const [currentUser, setCurrentUser] = useState(null); 
+      const [showModal, setShowModal] = useState(false);
+      const [showAddTripModal, setShowAddTripModal] = useState(false); 
+      const [selectedRoute, setSelectedRoute] = useState(null);
+      const [loading, setLoading] = useState(false);
+      
+      // Database States
+      const [routes, setRoutes] = useState([]);
+      const [allBookings, setAllBookings] = useState([]);
+      const [myBookings, setMyBookings] = useState([]);
+      const routesRef = useRef(routes); 
+
+      // Driver GPS & Notification States
+      const [driverLocation, setDriverLocation] = useState(null);
+      const [driverGpsError, setDriverGpsError] = useState(null);
+      const [cancelledNotifs, setCancelledNotifs] = useState([]);
+      const notifiedRef = useRef(new Set());
+
+      // App States
+      const [loginPhone, setLoginPhone] = useState('');
+      const [bookingTripType, setBookingTripType] = useState('round-trip');
+      const [busSubscription, setBusSubscription] = useState('daily');
+      const [pickupLocationStr, setPickupLocationStr] = useState(''); 
+      const [searchDate, setSearchDate] = useState(getFutureDateStr(1)); 
+      const [adminTab, setAdminTab] = useState('active'); 
+      const [driverTab, setDriverTab] = useState('active'); 
+
+      // Forms
+      const [empReg, setEmpReg] = useState({ name: '', phone: '' });
+      const [drvReg, setDrvReg] = useState({ 
+        name: '', phone: '', plate: '', capacity: 10, 
+        depTime: '07:30', retTime: '17:30', pickup: 'บิ๊กซี ดอนจั่น',
+        price: '', vehicleType: 'รถเก๋ง', tripDate: getTodayDateStr(),
+        lat: null, lng: null, priceWeekly: '225', priceMonthly: '900'
+      });
+
+      // --- API HELPERS ---
+      const getHeaders = () => ({
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+      });
+
+      const fetchData = async () => {
+        if (!SUPABASE_KEY) return;
+        try {
+          const rRes = await fetch(`${SUPABASE_URL}/routes?select=*`, { headers: getHeaders() });
+          const rData = await rRes.json();
+          if (Array.isArray(rData)) setRoutes(rData);
+
+          const bRes = await fetch(`${SUPABASE_URL}/bookings?select=*`, { headers: getHeaders() });
+          const bData = await bRes.json();
+          if (Array.isArray(bData)) {
+            const sortedData = bData.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            setAllBookings(sortedData);
+            if (currentUser && currentUser.phone) {
+              setMyBookings(sortedData.filter(b => b.passenger_phone === currentUser.phone));
+            }
+          }
+        } catch (e) { console.error("Sync Error:", e); }
+      };
+
+      useEffect(() => {
+        fetchData();
+        const interval = setInterval(fetchData, 5000); 
+        return () => clearInterval(interval);
+      }, [currentUser]);
+
+      useEffect(() => {
+        routesRef.current = routes;
+      }, [routes]);
+
+      // แจ้งเตือนคนขับเมื่อมีคนยกเลิก
+      useEffect(() => {
+        if (view === 'drv-dash' && currentUser?.role === 'driver') {
+           const todayStr = getTodayDateStr();
+           const myActiveRouteIds = routes.filter(r => r.driver_phone === currentUser.phone && r.trip_date >= todayStr).map(r => String(r.id));
+           
+           const newlyCancelled = allBookings.filter(b => 
+              myActiveRouteIds.includes(String(b.route_id)) && 
+              b.status === 'Cancelled' && 
+              !notifiedRef.current.has(b.id)
+           );
+
+           if (newlyCancelled.length > 0) {
+              setCancelledNotifs(prev => [...prev, ...newlyCancelled]);
+              newlyCancelled.forEach(b => notifiedRef.current.add(b.id));
+           }
+        }
+      }, [allBookings, view, routes, currentUser]);
+
+      // --- AUTO CLEANUP OLD DATA (14 DAYS) ---
+      useEffect(() => {
+        if (view === 'admin-dash') {
+          const cleanupOldData = async () => {
+            const twoWeeksAgoStr = getFutureDateStr(-14);
+            const oldRoutes = routesRef.current.filter(r => r.trip_date && r.trip_date < twoWeeksAgoStr);
+            
+            if (oldRoutes.length > 0) {
+              for (const r of oldRoutes) {
+                await fetch(`${SUPABASE_URL}/bookings?route_id=eq.${r.id}`, { method: 'DELETE', headers: getHeaders() });
+                await fetch(`${SUPABASE_URL}/routes?id=eq.${r.id}`, { method: 'DELETE', headers: getHeaders() });
+              }
+              fetchData(); 
+            }
+          };
+          cleanupOldData();
+        }
+      }, [view]);
+
+      // --- DRIVER GPS TRACKING LOGIC (BACKGROUND) ---
+      useEffect(() => {
+        let watchId = null;
+        if (currentUser?.role === 'driver') {
+          const startTracking = () => {
+            if ("geolocation" in navigator) {
+              watchId = navigator.geolocation.watchPosition(
+                async (position) => {
+                  const { latitude, longitude, accuracy } = position.coords;
+                  setDriverLocation({ lat: latitude, lng: longitude, accuracy });
+                  setDriverGpsError(null);
+
+                  if (accuracy > 2000) return;
+
+                  const todayStr = getTodayDateStr();
+                  const activeRoutes = routesRef.current.filter(r => r.driver_phone === currentUser.phone && r.trip_date >= todayStr);
+                  
+                  for(const route of activeRoutes) {
+                     const { status, weeklyPrice, monthlyPrice, isArchived } = getCarModelParts(route.car_model);
+                     if (isArchived) continue;
+
+                     let locData = `${latitude},${longitude}|${status}`;
+                     if (weeklyPrice || monthlyPrice) locData += `|${weeklyPrice}|${monthlyPrice}`;
+
+                     fetch(`${SUPABASE_URL}/routes?id=eq.${route.id}`, {
+                       method: 'PATCH',
+                       headers: getHeaders(),
+                       body: JSON.stringify({ car_model: locData })
+                     }).catch(e => console.error("GPS Patch Error", e));
+                  }
+                },
+                (error) => {
+                   if (error.code === 1) setDriverGpsError("ถูกปฏิเสธสิทธิ์ กรุณาอนุญาต Location");
+                   else setDriverGpsError(error.message);
+                },
+                { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 } 
+              );
+            } else {
+              setDriverGpsError("ไม่รองรับ GPS");
+            }
+          };
+          startTracking();
+        }
+        return () => { if (watchId) navigator.geolocation.clearWatch(watchId); };
+      }, [currentUser]);
+
+      // --- HANDLERS ---
+      const handleEmpReg = async () => {
+        if (!empReg.name || !empReg.phone) return alert('กรุณากรอกชื่อและเบอร์โทรศัพท์');
+        setLoading(true);
+        const userId = `emp_${Date.now()}`;
+        const payload = { id: userId, name: empReg.name, phone: empReg.phone, role: 'employee' };
+        
+        try {
+          await fetch(`${SUPABASE_URL}/profiles`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) });
+          setCurrentUser(payload);
+          setView('user-dash');
+          fetchData();
+        } catch (e) { 
+          setCurrentUser(payload);
+          setView('user-dash');
+        } finally { setLoading(false); }
+      };
+
+      const handleEmpLogin = async () => {
+        const cleanPhone = loginPhone.trim();
+        if (!cleanPhone) return alert('กรุณากรอกเบอร์โทรศัพท์');
+        setLoading(true);
+        try {
+          const res = await fetch(`${SUPABASE_URL}/profiles?phone=eq.${cleanPhone}&select=*`, { headers: getHeaders() });
+          let data = await res.json();
+          
+          if (!data || data.length === 0) {
+            const bRes = await fetch(`${SUPABASE_URL}/bookings?passenger_phone=eq.${cleanPhone}&select=*`, { headers: getHeaders() });
+            const bData = await bRes.json();
+            if (bData && bData.length > 0) {
+              const lastBooking = bData[bData.length - 1];
+              data = [{ id: lastBooking.user_id, name: lastBooking.passenger_name, phone: lastBooking.passenger_phone, role: 'employee' }];
+            }
+          }
+
+          if (data && data.length > 0) {
+            setCurrentUser({ id: data[0].id, name: data[0].name, phone: data[0].phone, role: 'employee' });
+            setView('user-dash');
+            fetchData();
+          } else { 
+            alert('ไม่พบข้อมูลพนักงาน กรุณาลงทะเบียนใหม่'); 
+            setView('reg-emp'); 
+          }
+        } catch (e) { alert('Login Error: ตรวจสอบการเชื่อมต่อ'); }
+        finally { setLoading(false); }
+      };
+
+      const handleInitialGpsPin = async () => {
+        try {
+          const pos = await getCurrentGpsPosition();
+          setDrvReg(prev => ({...prev, lat: pos.lat, lng: pos.lng}));
+          alert(`ปักหมุดสำเร็จ! (ความแม่นยำ: ${Math.round(pos.accuracy)}m)`);
+        } catch (e) {
+          alert("ไม่สามารถดึงพิกัดได้: " + e.message);
+        }
+      };
+
+      const handleDrvReg = async () => {
+        if (!drvReg.name || !drvReg.plate || !drvReg.phone || !drvReg.tripDate) return alert('กรุณากรอกข้อมูลให้ครบถ้วน');
+        setLoading(true);
+        const drvId = currentUser?.id || `drv_${Date.now()}`; 
+        
+        let finalPrice = parseFloat(drvReg.price || 0);
+        
+        let initialLocation = (drvReg.lat && drvReg.lng) ? `${drvReg.lat},${drvReg.lng}|เตรียมรถ` : "0,0|เตรียมรถ";
+        if (drvReg.vehicleType === 'รถบัส') {
+           initialLocation += `|${drvReg.priceWeekly || '225'}|${drvReg.priceMonthly || '900'}`;
+           finalPrice = 225; // Default base for bus
+        }
+
+        const routePayload = {
+          driver_name: drvReg.name,
+          driver_phone: drvReg.phone,
+          plate_number: drvReg.plate,
+          total_seats: parseInt(drvReg.capacity),
+          departure_time: drvReg.depTime,
+          return_time: drvReg.retTime,
+          name: drvReg.pickup,
+          driver_id: drvId,
+          price: finalPrice,
+          vehicle_type: drvReg.vehicleType,
+          trip_date: drvReg.tripDate,
+          car_model: initialLocation
+        };
+
+        try {
+          const res = await fetch(`${SUPABASE_URL}/routes`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(routePayload) });
+          if (res.ok) {
+            setCurrentUser({ id: drvId, name: drvReg.name, phone: drvReg.phone, role: 'driver' });
+            setShowAddTripModal(false);
+            setView('drv-dash');
+            fetchData();
+          } else { alert('โปรดตรวจสอบว่าตาราง routes มีคอลัมน์ที่จำเป็นครบถ้วน'); }
+        } catch (e) { alert('Network Error'); }
+        finally { setLoading(false); }
+      };
+
+      const handleDrvLogin = async () => {
+        const cleanPhone = loginPhone.trim(); 
+        if (!cleanPhone) return alert('กรุณากรอกเบอร์โทรศัพท์');
+        setLoading(true);
+        try {
+          const res = await fetch(`${SUPABASE_URL}/routes?driver_phone=eq.${cleanPhone}&select=*`, { headers: getHeaders() });
+          const data = await res.json();
+          if (data && data.length > 0) {
+            const drv = data[0]; 
+            setCurrentUser({ id: drv.driver_id, phone: drv.driver_phone, name: drv.driver_name, role: 'driver' });
+            setView('drv-dash');
+            setLoginPhone('');
+            fetchData();
+          } else { alert('ไม่พบข้อมูลคนขับจากเบอร์นี้'); setView('reg-drv'); }
+        } catch (e) { alert('Login Error: ตรวจสอบการเชื่อมต่อ'); }
+        finally { setLoading(false); }
+      };
+
+      const openAddTripModal = () => {
+        const myRoutes = routes.filter(r => r.driver_phone === currentUser.phone).sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+        if(myRoutes.length > 0) {
+           const last = myRoutes[0];
+           const { weeklyPrice, monthlyPrice } = getCarModelParts(last.car_model);
+           setDrvReg({
+              name: last.driver_name,
+              phone: last.driver_phone,
+              plate: last.plate_number,
+              capacity: last.total_seats,
+              depTime: last.departure_time,
+              retTime: last.return_time,
+              pickup: last.name,
+              price: last.price,
+              vehicleType: last.vehicle_type,
+              tripDate: getFutureDateStr(1),
+              lat: null, lng: null,
+              priceWeekly: weeklyPrice || '225',
+              priceMonthly: monthlyPrice || '900'
+           });
+           setShowAddTripModal(true);
+        }
+      };
+
+      const updateTripStatus = async (status, routeId) => {
+        setLoading(true);
+        const currentRoute = routes.find(r => r.id === routeId);
+        const { weeklyPrice, monthlyPrice, isArchived } = getCarModelParts(currentRoute?.car_model);
+        let coords = getCarModelParts(currentRoute?.car_model).coords;
+        
+        // อัปเดตบนหน้าจอทันที ไม่ต้องรอเน็ต
+        let newCarModel = `${coords}|${status}`;
+        if(weeklyPrice || monthlyPrice) newCarModel += `|${weeklyPrice}|${monthlyPrice}`;
+        if(isArchived) newCarModel += `|Archived`;
+        
+        setRoutes(prev => prev.map(r => r.id === routeId ? { ...r, car_model: newCarModel } : r));
+
+        try {
+          const pos = await getCurrentGpsPosition();
+          coords = `${pos.lat},${pos.lng}`;
+          setDriverLocation({ lat: pos.lat, lng: pos.lng, accuracy: pos.accuracy });
+          setDriverGpsError(null);
+        } catch (err) {
+          if (driverLocation && driverLocation.lat) {
+             coords = `${driverLocation.lat},${driverLocation.lng}`;
+          }
+        }
+
+        newCarModel = `${coords}|${status}`;
+        if(weeklyPrice || monthlyPrice) newCarModel += `|${weeklyPrice}|${monthlyPrice}`;
+        if(isArchived) newCarModel += `|Archived`;
+
+        try {
+          await fetch(`${SUPABASE_URL}/routes?id=eq.${routeId}`, {
+            method: 'PATCH', headers: getHeaders(), body: JSON.stringify({ car_model: newCarModel }) 
+          });
+        } catch (e) { console.error(e); }
+        setLoading(false);
+      };
+
+      const archiveRoute = async (routeId, currentCarModel) => {
+        if(!confirm('ยืนยันจบเที่ยวรถและย้ายไปประวัติย้อนหลัง? (ระบบจะหยุดการส่งพิกัดรถ)')) return;
+        
+        const parts = getCarModelParts(currentCarModel);
+        if (parts.isArchived) return;
+
+        let newModel = `${parts.coords}|${parts.status}`;
+        if (parts.weeklyPrice || parts.monthlyPrice) newModel += `|${parts.weeklyPrice}|${parts.monthlyPrice}`;
+        newModel += `|Archived`;
+
+        setRoutes(prev => prev.map(r => r.id === routeId ? { ...r, car_model: newModel } : r));
+        try {
+            await fetch(`${SUPABASE_URL}/routes?id=eq.${routeId}`, {
+                method: 'PATCH', headers: getHeaders(), body: JSON.stringify({ car_model: newModel })
+            });
+        } catch(e) { console.error(e); }
+      };
+
+      const submitBooking = async (route) => {
+        if (!currentUser) return alert("กรุณาเข้าสู่ระบบก่อนจอง");
+        setLoading(true);
+        
+        const tripTypeParts = [bookingTripType];
+        
+        if (route.vehicle_type === 'รถบัส' && busSubscription !== 'daily') {
+           tripTypeParts.push(busSubscription === 'monthly' ? 'รายเดือน' : 'รายสัปดาห์');
+        }
+        if (pickupLocationStr.trim()) tripTypeParts.push(pickupLocationStr.trim());
+
+        const finalTripType = tripTypeParts.join('|');
+
+        const newBooking = { route_id: route.id, user_id: currentUser.id, passenger_name: currentUser.name, passenger_phone: currentUser.phone, trip_type: finalTripType, status: 'Pending', created_at: new Date().toISOString() };
+        try {
+          const res = await fetch(`${SUPABASE_URL}/bookings`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(newBooking) });
+          if (res.ok) { 
+            alert('ส่งคำขอจองเรียบร้อย รอคนขับยืนยันครับ'); 
+            setShowModal(false); 
+            setPickupLocationStr(''); 
+            setBusSubscription('daily');
+            fetchData(); 
+            setView('user-dash'); 
+          }
+        } catch (e) { alert(e.message); }
+        finally { setLoading(false); }
+      };
+
+      const cancelBooking = async (bookingId) => {
+        if (!confirm('ยืนยันยกเลิกการจอง? (ระบบจะย้ายข้อมูลไปที่ประวัติย้อนหลังทันที)')) return;
+        setLoading(true);
+        try { 
+          setAllBookings(prev => prev.map(b => b.id === bookingId ? { ...b, status: 'Cancelled' } : b));
+          await fetch(`${SUPABASE_URL}/bookings?id=eq.${bookingId}`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify({ status: 'Cancelled' }) }); 
+          fetchData(); 
+        }
+        catch (e) { console.error(e); } finally { setLoading(false); }
+      };
+
+      const handleDriverCancelBooking = async (bookingId) => {
+        if (!confirm('ยืนยันยกเลิกผู้โดยสารท่านนี้? (ระบบจะย้ายข้อมูลไปที่ประวัติย้อนหลัง)')) return;
+        setAllBookings(prev => prev.map(b => b.id === bookingId ? { ...b, status: 'Cancelled' } : b));
+        try { await fetch(`${SUPABASE_URL}/bookings?id=eq.${bookingId}`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify({ status: 'Cancelled' }) }); fetchData(); }
+        catch (e) { console.error(e); fetchData(); }
+      };
+
+      const updateBookingStatus = async (bookingId, status) => {
+        setAllBookings(prev => prev.map(b => b.id === bookingId ? { ...b, status } : b));
+        try { await fetch(`${SUPABASE_URL}/bookings?id=eq.${bookingId}`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify({ status }) }); }
+        catch (e) { console.error(e); fetchData(); }
+      };
+
+      const exportToExcel = () => {
+        const historyData = allBookings.filter(b => {
+            const route = routes.find(r => String(r.id) === String(b.route_id));
+            const { isArchived } = getCarModelParts(route?.car_model);
+            const isPast = route ? (route.trip_date < getTodayDateStr() || isArchived) : true;
+            return isPast || b.status === 'Cancelled' || b.status === 'Archived';
+        });
+
+        if (historyData.length === 0) return alert("ไม่มีข้อมูลประวัติให้ดาวน์โหลด");
+
+        const headers = ["วันที่เดินทาง", "พนักงาน", "เบอร์โทรพนักงาน", "ประเภท", "จุดรับ", "ค่าโดยสาร", "คนขับรถ", "ทะเบียน", "สถานะ"];
+        
+        const rows = historyData.map(b => {
+            const route = routes.find(r => String(r.id) === String(b.route_id));
+            const { type: tType, subText, pickup } = parseTripData(b.trip_type);
+            const isOneWay = tType !== 'round-trip';
+            
+            let basePrice = route?.price || 0;
+            if (route?.vehicle_type === 'รถบัส') {
+                const parts = getCarModelParts(route?.car_model);
+                if (subText === 'รายสัปดาห์' && parts.weeklyPrice) basePrice = parseFloat(parts.weeklyPrice);
+                else if (subText === 'รายสัปดาห์') basePrice = 225;
+                
+                if (subText === 'รายเดือน' && parts.monthlyPrice) basePrice = parseFloat(parts.monthlyPrice);
+                else if (subText === 'รายเดือน') basePrice = 900;
+            }
+            const price = isOneWay && !subText ? basePrice / 2 : basePrice;
+
+            return [
+                route?.trip_date || "N/A",
+                b.passenger_name,
+                b.passenger_phone,
+                getTripTypeText(tType) + (subText ? ` (${subText})` : ''),
+                pickup || "-",
+                price,
+                route?.driver_name || "-",
+                route?.plate_number || "-",
+                b.status
+            ].map(cell => `"${cell}"`).join(","); 
+        });
+
+        const csvContent = "\uFEFF" + headers.join(",") + "\n" + rows.join("\n");
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.setAttribute("href", url);
+        link.setAttribute("download", `cartrack_history_${getTodayDateStr()}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      };
+
+      const getSeats = (route) => {
+        const approvedCount = allBookings.filter(b => String(b.route_id) === String(route.id) && b.status === 'Approved').length;
+        return (route.total_seats || 10) - approvedCount;
+      };
+
+      const getVehicleIcon = (type) => {
+        const Component = getVehicleIconComponent(type);
+        return Component ? <Component className="w-4 h-4" /> : <span>🚗</span>;
+      };
+
+      // --- VIEWS ---
+
+      if (view === 'welcome') {
+        return (
+          <div 
+            className="min-h-screen w-full relative flex flex-col items-center justify-end p-4 sm:p-8 bg-[#f1f5f9] overflow-hidden"
+          >
+            {/* แก้ไขให้ดึงรูปภาพพื้นหลังมาจาก Path ปกติ */}
+            <img 
+              src="./car.jpg" 
+              alt="Hana Carpool Background" 
+              fetchpriority="high"
+              loading="eager"
+              className="absolute inset-0 w-full h-full object-cover sm:object-contain object-top z-0 pointer-events-none"
+              onError={(e) => { e.target.style.display = 'none'; }}
+            />
+
+            <div className="relative z-10 bg-white/95 backdrop-blur-xl p-6 md:p-8 rounded-[2rem] shadow-2xl border border-slate-100 max-w-2xl w-full mb-4 sm:mb-10 animate-in slide-in-from-bottom-10 duration-700">
+              <div className="space-y-4">
+                <div className="grid md:grid-cols-2 gap-4">
+                  <button onClick={() => setView('login-emp')} className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black shadow-lg hover:bg-blue-700 transition-transform active:scale-95 flex items-center justify-center gap-3 text-lg">
+                    {User && <User className="w-6 h-6" />} เข้าสู่ระบบพนักงาน
+                  </button>
+
+                  <button onClick={() => setView('login-drv')} className="w-full bg-slate-800 text-white py-4 rounded-2xl font-black shadow-lg hover:bg-slate-900 transition-transform active:scale-95 flex items-center justify-center gap-3 text-lg">
+                    {Truck && <Truck className="w-6 h-6" />} เข้าสู่ระบบคนขับ
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4 pt-2">
+                  <button onClick={() => setView('reg-emp')} className="w-full bg-blue-50 text-blue-700 border border-blue-200 py-3 rounded-xl font-bold text-xs uppercase hover:bg-blue-100 transition-colors">
+                    ลงทะเบียนพนักงาน
+                  </button>
+                  <button onClick={() => setView('reg-drv')} className="w-full bg-slate-50 text-slate-700 border border-slate-200 py-3 rounded-xl font-bold text-xs uppercase hover:bg-slate-100 transition-colors">
+                    ลงทะเบียนคนขับ
+                  </button>
+                </div>
+
+                <div className="pt-4 mt-2 border-t border-slate-200">
+                  <button onClick={() => setView('login-admin')} className="w-full text-slate-400 hover:text-red-500 py-2 font-black text-[11px] uppercase tracking-widest flex items-center justify-center gap-2 transition-colors">
+                    {ShieldCheck && <ShieldCheck className="w-5 h-5" />} ผู้ดูแลระบบ (Admin)
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
+          <nav className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-slate-200 px-4 py-3 flex justify-between items-center shadow-sm">
+            <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView('welcome')}>
+              <div className="bg-blue-600 p-1.5 rounded-lg shadow-md">{Bus && <Bus className="text-white w-4 h-4" />}</div>
+              <span className="font-bold text-blue-900 italic tracking-tighter uppercase">HANA CAR POOL</span>
+            </div>
+            <div className="flex items-center gap-2">
+                <button onClick={() => setView('welcome')} className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-blue-50 text-blue-700 text-[10px] font-black uppercase shadow-sm">{Home && <Home className="w-3 h-3" />} Home</button>
+                {currentUser && <button onClick={() => {setCurrentUser(null); setView('welcome');}} className="p-2 bg-red-50 text-red-500 rounded-xl hover:bg-red-500 hover:text-white transition-all">{LogOut && <LogOut className="w-4 h-4" />}</button>}
+            </div>
+          </nav>
+
+          <main className="max-w-4xl mx-auto p-4 pb-24">
+            
+            {/* LOGIN VIEWS */}
+            {(view === 'login-drv' || view === 'login-emp') && (
+               <div className="max-w-sm mx-auto py-10 space-y-6">
+                <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
+                    <button onClick={()=>setView('welcome')} className="p-2 bg-white rounded-full border shadow-sm transition-transform active:scale-90">{ChevronLeft && <ChevronLeft className="w-5 h-5"/>}</button> เข้าสู่ระบบ
+                </h2>
+                <div className="bg-white p-8 rounded-[3rem] border shadow-2xl space-y-5 text-center">
+                  <div className="inline-block p-4 bg-blue-100 rounded-3xl mb-4">{view === 'login-drv' ? (Truck && <Truck className="w-10 h-10 text-blue-600" />) : (User && <User className="w-10 h-10 text-blue-600" />)}</div>
+                  <p className="text-sm font-bold text-slate-500 uppercase tracking-tighter">ระบุเบอร์โทรศัพท์มือถือ</p>
+                  <input type="tel" placeholder="08XXXXXXXX" className="w-full bg-slate-50 border-2 rounded-2xl px-5 py-4 text-center text-lg font-black outline-none focus:border-blue-600 transition-all" value={loginPhone} onChange={(e)=>setLoginPhone(e.target.value)} />
+                  <button onClick={view === 'login-drv' ? handleDrvLogin : handleEmpLogin} disabled={loading} className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black shadow-lg transition-all active:scale-95 disabled:bg-slate-300">
+                    {loading ? "กำลังโหลด..." : "เข้าสู่ระบบ"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* LOGIN ADMIN */}
+            {view === 'login-admin' && (
+               <div className="max-w-sm mx-auto py-10 space-y-6">
+                <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
+                    <button onClick={()=>setView('welcome')} className="p-2 bg-white rounded-full border shadow-sm transition-transform active:scale-90">{ChevronLeft && <ChevronLeft className="w-5 h-5"/>}</button> ผู้ดูแลระบบ
+                </h2>
+                <div className="bg-white p-8 rounded-[3rem] border shadow-2xl space-y-5 text-center">
+                  <div className="inline-block p-4 bg-slate-100 rounded-3xl mb-4">{Lock && <Lock className="w-10 h-10 text-slate-600" />}</div>
+                  <p className="text-sm font-bold text-slate-500 uppercase tracking-tighter">รหัสผ่านแอดมิน</p>
+                  <input type="password" placeholder="Password" className="w-full bg-slate-50 border-2 rounded-2xl px-5 py-4 text-center text-lg font-black outline-none focus:border-slate-600 transition-all" value={loginPhone} onChange={(e)=>setLoginPhone(e.target.value)} />
+                  <button onClick={() => {
+                     if (loginPhone === 'hrd526') { setView('admin-dash'); setLoginPhone(''); }
+                     else { alert('รหัสผ่านไม่ถูกต้อง'); setLoginPhone(''); }
+                  }} className="w-full bg-slate-800 text-white py-4 rounded-2xl font-black shadow-lg transition-all active:scale-95">
+                    เข้าสู่แผงควบคุม
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* REGISTRATION FORM EMP */}
+            {view === 'reg-emp' && (
+              <div className="max-w-sm mx-auto py-10 space-y-6">
+                 <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2 italic uppercase"><button onClick={()=>setView('welcome')} className="p-2 bg-white rounded-full border shadow-sm">{ChevronLeft && <ChevronLeft className="w-5 h-5"/>}</button> ข้อมูลพนักงาน</h2>
+                <div className="bg-white p-8 rounded-[3rem] border shadow-2xl space-y-5">
+                  <div className="space-y-1"><label className="text-[9px] font-black text-slate-400 ml-3 uppercase tracking-widest">Full Name</label><input type="text" placeholder="ชื่อ-นามสกุล" className="w-full bg-slate-50 border-2 rounded-2xl px-5 py-4 text-sm font-bold outline-none focus:border-blue-600 transition-all" value={empReg.name} onChange={(e)=>setEmpReg({...empReg, name: e.target.value})} /></div>
+                  <div className="space-y-1"><label className="text-[9px] font-black text-slate-400 ml-3 uppercase tracking-widest">Phone Number</label><input type="tel" placeholder="08XXXXXXXX" className="w-full bg-slate-50 border-2 rounded-2xl px-5 py-4 text-sm font-bold outline-none focus:border-blue-600 transition-all" value={empReg.phone} onChange={(e)=>setEmpReg({...empReg, phone: e.target.value})} /></div>
+                  <button onClick={handleEmpReg} disabled={loading} className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black shadow-xl hover:bg-blue-700 transition-all active:scale-95 uppercase tracking-widest text-xs">{loading ? "กำลังบันทึก..." : "ยืนยันลงทะเบียน"}</button>
+                </div>
+              </div>
+            )}
+
+            {}
+            {/* REGISTRATION FORM DRIVER */}
+            {view === 'reg-drv' && (
+              <div className="max-w-md mx-auto space-y-6">
+                <h2 className="text-2xl font-black text-slate-800 text-center flex items-center justify-center gap-2 py-4">
+                    <button onClick={()=>setView('welcome')} className="p-2 bg-white rounded-full border shadow-sm">{ChevronLeft && <ChevronLeft className="w-5 h-5"/>}</button> ลงทะเบียนเปิดสายรถ
+                </h2>
+                <div className="bg-white p-8 rounded-[3rem] border border-slate-200 shadow-2xl space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="col-span-2 space-y-1">
+                      <label className="text-[9px] font-black text-slate-400 uppercase ml-2">ปักหมุดตำแหน่งเริ่มต้น (GPS)</label>
+                      <button type="button" onClick={handleInitialGpsPin} className={`w-full py-3 rounded-2xl text-sm font-bold flex items-center justify-center gap-2 transition-colors ${drvReg.lat ? 'bg-emerald-50 text-emerald-600 border border-emerald-200' : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100'}`}>
+                        {MapPin && <MapPin className="w-4 h-4" />} {drvReg.lat ? "ปักหมุดสำเร็จ" : "กดเพื่อดึงพิกัดปัจจุบัน"}
+                      </button>
+                    </div>
+                    <div className="space-y-1"><label className="text-[9px] font-black text-slate-400 uppercase ml-2">ชื่อคนขับ</label><input type="text" placeholder="ชื่อ-นามสกุล" className="w-full bg-slate-50 rounded-2xl px-4 py-3 text-sm font-bold outline-none focus:border-blue-400" value={drvReg.name} onChange={(e)=>setDrvReg({...drvReg, name: e.target.value})} /></div>
+                    <div className="space-y-1"><label className="text-[9px] font-black text-slate-400 uppercase ml-2">เบอร์โทรศัพท์</label><input type="tel" placeholder="08XXXXXXXX" className="w-full bg-slate-50 rounded-2xl px-4 py-3 text-sm font-bold outline-none focus:border-blue-400" value={drvReg.phone} onChange={(e)=>setDrvReg({...drvReg, phone: e.target.value})} /></div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                       <label className="text-[9px] font-black text-slate-400 uppercase ml-2">ประเภทรถ</label>
+                       <select className="w-full bg-slate-50 rounded-2xl px-4 py-3 text-sm font-bold outline-none focus:border-blue-400" value={drvReg.vehicleType} onChange={(e)=>setDrvReg({...drvReg, vehicleType: e.target.value})}>
+                          <option value="รถเก๋ง">รถเก๋ง</option>
+                          <option value="รถกระบะ">รถกระบะ</option>
+                          <option value="รถตู้">รถตู้</option>
+                          <option value="รถบัส">รถบัส</option>
+                       </select>
+                    </div>
+                    <div className="space-y-1"><label className="text-[9px] font-black text-slate-400 uppercase ml-2">ความจุผู้โดยสาร</label><input type="number" placeholder="4" className="w-full bg-slate-50 rounded-2xl px-4 py-3 text-sm font-bold outline-none focus:border-blue-400" value={drvReg.capacity} onChange={(e)=>setDrvReg({...drvReg, capacity: e.target.value})} /></div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1"><label className="text-[9px] font-black text-slate-400 uppercase ml-2">ทะเบียนรถ</label><input type="text" placeholder="กข-1234" className="w-full bg-slate-50 rounded-2xl px-4 py-3 text-sm font-bold outline-none focus:border-blue-400" value={drvReg.plate} onChange={(e)=>setDrvReg({...drvReg, plate: e.target.value})} /></div>
+                    
+                    {drvReg.vehicleType !== 'รถบัส' && (
+                      <div className="space-y-1"><label className="text-[9px] font-black text-slate-400 uppercase ml-2 text-blue-500">ค่าโดยสารรายวัน (บาท)</label><input type="number" placeholder="100" className="w-full bg-blue-50 text-blue-700 rounded-2xl px-4 py-3 text-sm font-black outline-none border border-blue-200 focus:border-blue-400" value={drvReg.price} onChange={(e)=>setDrvReg({...drvReg, price: e.target.value})} /></div>
+                    )}
+                  </div>
+                  
+                  {/* ตัวเลือกรถบัส (รายสัปดาห์/รายเดือน) */}
+                  {drvReg.vehicleType === 'รถบัส' && (
+                    <div className="col-span-2 grid gap-4 bg-indigo-50 p-4 rounded-2xl border border-indigo-100 mt-2">
+                       <div className="space-y-1">
+                          <label className="text-[9px] font-black text-indigo-500 uppercase ml-2">รูปแบบค่าโดยสาร (รถบัส)</label>
+                          <select 
+                            className="w-full bg-white rounded-2xl px-4 py-3 text-sm font-bold outline-none focus:border-indigo-400"
+                            value={drvReg.busPackage || 'weekly'}
+                            onChange={(e)=>setDrvReg({...drvReg, busPackage: e.target.value})}
+                          >
+                            <option value="weekly">รายสัปดาห์ (225 บาท)</option>
+                            <option value="monthly">รายเดือน (900 บาท)</option>
+                          </select>
+                       </div>
+                       <p className="text-[10px] text-indigo-600 font-bold ml-2">
+                         * วันที่สิ้นสุดรอบเหมาจ่าย: {getEndDateStr(drvReg.tripDate, drvReg.busPackage === 'monthly' ? 30 : 7)}
+                       </p>
+                    </div>
+                  )}
+
+                  <div className="space-y-1">
+                      <label className="text-[9px] font-black text-slate-400 uppercase ml-2 text-indigo-500">วันที่ออกเดินทาง (ล่วงหน้าไม่เกิน 2 วัน)</label>
+                      <input type="date" min={getTodayDateStr()} max={getFutureDateStr(2)} className="w-full bg-indigo-50 text-indigo-700 rounded-2xl px-4 py-3 text-sm font-black outline-none border border-indigo-200" value={drvReg.tripDate} onChange={(e)=>setDrvReg({...drvReg, tripDate: e.target.value})} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4 p-4 bg-slate-100 rounded-2xl border border-slate-200 mt-2">
+                    <div><label className="text-[9px] font-black text-slate-500 uppercase">เวลาขาไป</label><input type="time" className="w-full bg-transparent font-bold outline-none" value={drvReg.depTime} onChange={(e)=>setDrvReg({...drvReg, depTime: e.target.value})} /></div>
+                    <div><label className="text-[9px] font-black text-slate-500 uppercase">เวลากลับ</label><input type="time" className="w-full bg-transparent font-bold outline-none" value={drvReg.retTime} onChange={(e)=>setDrvReg({...drvReg, retTime: e.target.value})} /></div>
+                  </div>
+                  <div className="space-y-1"><label className="text-[9px] font-black text-slate-400 uppercase ml-2">จุดรับ-ส่งหลัก</label><input type="text" placeholder="เช่น บิ๊กซี ดอนจั่น" className="w-full bg-slate-50 rounded-2xl px-4 py-4 text-sm font-bold outline-none border-2 border-slate-100 focus:border-blue-400" value={drvReg.pickup} onChange={(e)=>setDrvReg({...drvReg, pickup: e.target.value})} /></div>
+                  
+                  <button onClick={handleDrvReg} disabled={loading} className="w-full bg-blue-600 text-white py-5 rounded-[2rem] font-black shadow-xl disabled:bg-slate-300 mt-4 uppercase tracking-widest text-xs">
+                    {loading ? "กำลังเปิดสายรถ..." : "เปิดสายรถบริการ"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {}
+            {/* DRIVER DASHBOARD (MULTI-DAY SUPPORT & REVENUE) */}
+            {view === 'drv-dash' && currentUser && (
+              <div className="space-y-6 animate-in fade-in duration-500">
+                {/* แถบแจ้งเตือนเมื่อมีคนยกเลิก */}
+                {cancelledNotifs.length > 0 && (
+                   <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-xl shadow-sm mb-6 flex justify-between items-start animate-in slide-in-from-top-4">
+                      <div>
+                         <h4 className="text-red-700 font-black text-sm flex items-center gap-2 mb-1">
+                            {Bell && <Bell className="w-5 h-5 animate-bounce"/>} แจ้งเตือน: มีผู้โดยสารยกเลิกการจอง!
+                         </h4>
+                         <ul className="space-y-1">
+                            {cancelledNotifs.map(b => (
+                               <li key={b.id} className="text-xs text-red-600 font-bold">- คุณ {b.passenger_name} ({b.passenger_phone})</li>
+                            ))}
+                         </ul>
+                      </div>
+                      <button onClick={() => setCancelledNotifs([])} className="text-red-400 hover:text-red-600 p-1">{X && <X className="w-5 h-5"/>}</button>
+                   </div>
+                )}
+
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center px-2 gap-4">
+                   <div>
+                     <h2 className="text-2xl font-black text-slate-800">
+                       Driver Monitor
+                     </h2>
+                     <div className="flex items-center gap-2 mt-2">
+                       {driverLocation ? (
+                         <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-md border border-emerald-100 flex items-center gap-1">{CheckCircle && <CheckCircle className="w-3 h-3"/>} GPS ส่งสัญญาณ (แม่นยำ {Math.round(driverLocation.accuracy)}m)</span>
+                       ) : driverGpsError ? (
+                         <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-1 rounded-md border border-red-100 flex items-center gap-1">{AlertCircle && <AlertCircle className="w-3 h-3"/>} GPS Error: {driverGpsError}</span>
+                       ) : (
+                         <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-1 rounded-md border border-amber-100 flex items-center gap-1">{Clock && <Clock className="w-3 h-3 animate-spin"/>} รอสัญญาณ GPS...</span>
+                       )}
+                     </div>
+                   </div>
+                   <button onClick={openAddTripModal} className="bg-blue-600 text-white px-4 py-2 rounded-xl text-[10px] font-black shadow-lg flex items-center gap-2 hover:bg-blue-700 transition-colors">
+                      {CopyPlus && <CopyPlus className="w-4 h-4" />} เพิ่มรอบเดินรถใหม่
+                   </button>
+                </div>
+
+                <div className="flex gap-2 bg-slate-200 p-1.5 rounded-2xl">
+                   <button onClick={()=>setDriverTab('active')} className={`flex-1 py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${driverTab==='active'?'bg-white text-blue-700 shadow-sm':'text-slate-500 hover:bg-slate-300'}`}>รายการปัจจุบัน</button>
+                   <button onClick={()=>setDriverTab('history')} className={`flex-1 py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${driverTab==='history'?'bg-white text-slate-700 shadow-sm':'text-slate-500 hover:bg-slate-300'}`}>ประวัติย้อนหลัง</button>
+                </div>
+                
+                {routes.filter(r => {
+                     if (r.driver_phone !== currentUser.phone) return false;
+                     const { isArchived } = getCarModelParts(r.car_model);
+                     return driverTab === 'active' ? (r.trip_date >= getTodayDateStr() && !isArchived) : (r.trip_date < getTodayDateStr() || isArchived);
+                   })
+                   .sort((a,b) => new Date(a.trip_date) - new Date(b.trip_date))
+                   .map((route, index) => {
+                  
+                  const routeBookings = allBookings.filter(b => String(b.route_id) === String(route.id) && b.status !== 'Cancelled' && b.status !== 'Archived');
+                  const approvedBookings = routeBookings.filter(b => b.status === 'Approved');
+                  const pendingBookings = routeBookings.filter(b => b.status === 'Pending');
+                  
+                  const revenue = approvedBookings.reduce((sum, b) => {
+                     const { type: tType, subText } = parseTripData(b.trip_type);
+                     let basePrice = route.price || 0;
+                     if (route.vehicle_type === 'รถบัส') {
+                        const parts = getCarModelParts(route.car_model);
+                        if (subText === 'รายสัปดาห์' && parts.weeklyPrice) basePrice = parseFloat(parts.weeklyPrice);
+                        else if (subText === 'รายสัปดาห์') basePrice = 225;
+                        
+                        if (subText === 'รายเดือน' && parts.monthlyPrice) basePrice = parseFloat(parts.monthlyPrice);
+                        else if (subText === 'รายเดือน') basePrice = 900;
+                     }
+                     return sum + (tType !== 'round-trip' && !subText ? (basePrice / 2) : basePrice);
+                  }, 0);
+
+                  const currentStatus = getCarModelParts(route.car_model).status;
+                  const { busPackage } = getCarModelParts(route.car_model);
+
+                  return (
+                    <div key={route.id} className={`bg-white rounded-[2.5rem] p-6 sm:p-8 border shadow-xl relative overflow-hidden mb-6 ${driverTab === 'history' ? 'opacity-80 border-slate-200' : 'border-blue-100'}`}>
+                      <div className="flex justify-between items-start mb-6">
+                        <div>
+                          <span className="text-[10px] bg-blue-600 text-white px-3 py-1 rounded-full uppercase tracking-widest">รอบที่ {index+1} : {route.plate_number}</span>
+                          <p className="text-sm font-black text-slate-800 mt-2 flex items-center gap-1">{Calendar && <Calendar className="w-4 h-4 text-blue-500"/>} วันที่: {route.trip_date || "ไม่ระบุ"}</p>
+                          {route.vehicle_type === 'รถบัส' && (
+                            <p className="text-[10px] text-indigo-500 font-bold mt-1 bg-indigo-50 inline-block px-2 py-1 rounded">
+                               แพ็กเกจ: {busPackage === 'monthly' ? 'รายเดือน' : 'รายสัปดาห์'}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex items-start gap-2">
+                           <div className="bg-green-50 px-4 py-2 rounded-2xl border border-green-100 text-right shadow-sm">
+                             <p className="text-[9px] font-black text-green-600 uppercase tracking-widest mb-1">รายรับรวมรอบนี้</p>
+                             <p className="text-2xl font-black text-green-700 leading-none">{revenue} ฿</p>
+                           </div>
+                           {driverTab === 'active' && (
+                             <button onClick={() => archiveRoute(route.id, route.car_model)} className="p-3 bg-red-50 text-red-500 hover:bg-red-500 hover:text-white rounded-2xl transition-all shadow-sm border border-red-100" title="จบเที่ยวรถ (ย้ายไปประวัติย้อนหลัง)">
+                                {Trash2 && <Trash2 className="w-6 h-6" />}
+                             </button>
+                           )}
+                        </div>
+                      </div>
+                      
+                      <div className="grid grid-cols-2 gap-4 mb-6">
+                        <div className="bg-blue-50 p-4 sm:p-6 rounded-3xl border border-blue-100 text-center">
+                          <p className="text-[10px] font-black text-blue-400 uppercase mb-1">ผู้โดยสาร (อนุมัติ)</p>
+                          <p className="text-3xl font-black text-blue-800">{approvedBookings.length}</p>
+                        </div>
+                        <div className="bg-yellow-50 p-4 sm:p-6 rounded-3xl border border-yellow-200 text-center">
+                          <p className="text-[10px] font-black text-yellow-600 uppercase mb-1">รอยืนยัน</p>
+                          <p className="text-3xl font-black text-yellow-700">{pendingBookings.length}</p>
+                        </div>
+                      </div>
+
+                      {driverTab === 'active' && (
+                        <div className="p-6 bg-slate-900 rounded-[2.5rem] text-white space-y-4 shadow-2xl mb-8">
+                          <h3 className="font-black text-[10px] uppercase tracking-widest text-slate-400 flex items-center gap-2">{LocateFixed && <LocateFixed className="w-3 h-3 text-red-500" />} อัปเดตสถานะรถ (GPS)</h3>
+                          <div className="grid grid-cols-3 gap-2">
+                            {["เตรียมรถ", "กำลังรับพนักงาน", "ถึงจุดหมาย"].map(s => (
+                              <button key={s} onClick={()=>updateTripStatus(s, route.id)} className={`py-4 rounded-xl text-[9px] font-black transition-all ${currentStatus === s ? 'bg-blue-600 text-white ring-4 ring-blue-500/50 shadow-lg shadow-blue-500/30' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}>
+                                {s}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <section className="space-y-3">
+                        <div className="flex justify-between items-end">
+                           <h3 className="text-sm font-bold flex items-center gap-2 px-2 text-slate-700 uppercase italic">{Users && <Users className="w-5 h-5 text-blue-600" />} รายชื่อผู้โดยสาร</h3>
+                        </div>
+                        <div className="space-y-3">
+                          {routeBookings.map(p => {
+                             const { type: tType, pickup } = parseTripData(p.trip_type);
+                             return (
+                             <div key={p.id} className="bg-slate-50 p-5 rounded-[1.5rem] border shadow-sm flex justify-between items-center transition-all hover:border-blue-200">
+                              <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center font-black text-blue-600 text-lg shadow-inner">{p.passenger_name?.[0] || 'U'}</div>
+                                <div>
+                                  <p className="font-bold text-sm text-slate-800">{p.passenger_name}</p>
+                                  <div className="flex items-center gap-2 mt-1">
+                                     <p className="text-[9px] text-slate-400 font-bold tracking-widest">{Phone && <Phone className="w-3 h-3 inline"/>} {p.passenger_phone}</p>
+                                     <p className="text-[8px] bg-white border px-1.5 py-0.5 rounded text-slate-500 font-black uppercase">{getTripTypeText(tType)}</p>
+                                  </div>
+                                  {pickup && <p className="text-[10px] text-blue-600 font-black mt-1 bg-blue-50 inline-block px-2 py-0.5 rounded">จุดรับ: {pickup}</p>}
+                                </div>
+                              </div>
+                              <div className="flex gap-2 items-center">
+                                {p.status === 'Pending' && driverTab === 'active' ? (
+                                  <>
+                                    <button onClick={() => updateBookingStatus(p.id, 'Rejected')} className="w-10 h-10 bg-red-50 text-red-500 rounded-xl flex items-center justify-center transition-colors hover:bg-red-500 hover:text-white">{UserMinus && <UserMinus className="w-5 h-5" />}</button>
+                                    <button onClick={() => updateBookingStatus(p.id, 'Approved')} className="w-10 h-10 bg-green-50 text-green-600 rounded-xl flex items-center justify-center transition-colors hover:bg-green-600 hover:text-white">{UserCheck && <UserCheck className="w-5 h-5" />}</button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span className={`text-[9px] font-black px-4 py-2 rounded-xl uppercase tracking-widest ${p.status === 'Approved' ? 'bg-green-100 text-green-700' : 'bg-red-50 text-red-600'}`}>
+                                      {p.status === 'Approved' ? '✅ อนุมัติแล้ว' : p.status}
+                                    </span>
+                                    {p.status === 'Approved' && driverTab === 'active' && (
+                                      <button onClick={() => handleDriverCancelBooking(p.id)} className="w-10 h-10 bg-slate-100 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl flex items-center justify-center transition-colors border border-slate-200" title="ยกเลิกผู้โดยสารท่านนี้">
+                                        {X && <X className="w-5 h-5" />}
+                                      </button>
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                             </div>
+                          )})}
+                          {routeBookings.length === 0 && (
+                            <div className="text-center p-6 bg-white border-2 border-dashed border-slate-200 rounded-3xl text-slate-400 font-bold text-xs">ยังไม่มีผู้โดยสารในรอบนี้</div>
+                          )}
+                        </div>
+                        
+                        {driverTab === 'active' && (
+                          <div className="mt-6">
+                              <p className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2 mb-2">
+                                 {Navigation && <Navigation className="w-3 h-3 text-blue-600" />} แผนที่พิกัดรถของคุณ
+                              </p>
+                              <RealLiveMap rawData={route.car_model} forEmployee={false} vehicleType={route.vehicle_type} />
+                          </div>
+                        )}
+                      </section>
+                    </div>
+                  );
+                })}
+
+                {routes.filter(r => {
+                     if (r.driver_phone !== currentUser.phone) return false;
+                     const { isArchived } = getCarModelParts(r.car_model);
+                     return driverTab === 'active' ? (r.trip_date >= getTodayDateStr() && !isArchived) : (r.trip_date < getTodayDateStr() || isArchived);
+                   }).length === 0 && (
+                   <div className="text-center p-12 bg-white rounded-3xl border border-slate-200 text-slate-400 font-bold shadow-xl">ไม่พบข้อมูลในหมวดหมู่นี้</div>
+                )}
+              </div>
+            )}
+
+            {}
+            {/* EMPLOYEE DASHBOARD */}
+            {view === 'user-dash' && currentUser && (
+              <div className="space-y-6 animate-in slide-in-from-bottom-5 duration-500">
+                <div className="bg-gradient-to-br from-blue-700 to-indigo-900 rounded-[3rem] p-8 text-white shadow-2xl overflow-hidden relative">
+                  <div className="relative z-10">
+                    <h2 className="text-3xl font-black mb-1 leading-tight italic tracking-tight">สวัสดีคุณ<br/>{currentUser.name} 👋</h2>
+                    <p className="opacity-70 text-xs mb-8 font-bold uppercase tracking-[0.2em]">Employee ID: {currentUser.id.slice(-5)}</p>
+                    <button onClick={() => setView('booking')} className="bg-white text-blue-700 px-8 py-4 rounded-2xl font-black shadow-lg flex items-center gap-2 active:scale-95 transition-transform">
+                      {CalendarSearch && <CalendarSearch className="w-5 h-5" />} จองที่นั่งล่วงหน้า
+                    </button>
+                  </div>
+                  {Bus && <Bus className="absolute -bottom-10 -right-10 w-48 h-48 opacity-10 rotate-12" />}
+                </div>
+                
+                <section className="space-y-4">
+                  <h3 className="font-bold flex items-center gap-2 px-2 text-slate-700 uppercase italic">{ClipboardList && <ClipboardList className="w-5 h-5 text-blue-600" />} สถานะการเดินทาง</h3>
+                  {myBookings.filter(b => b.status !== 'Archived' && b.status !== 'Cancelled').map(b => {
+                    const route = routes.find(r => String(r.id) === String(b.route_id));
+                    const { type: tType, pickup, subText } = parseTripData(b.trip_type);
+                    const isOneWay = tType !== 'round-trip';
+                    
+                    let basePrice = route?.price || 0;
+                    if (route?.vehicle_type === 'รถบัส') {
+                        const parts = getCarModelParts(route?.car_model);
+                        if (subText === 'รายสัปดาห์' && parts.weeklyPrice) basePrice = parseFloat(parts.weeklyPrice);
+                        else if (subText === 'รายสัปดาห์') basePrice = 225;
+                        
+                        if (subText === 'รายเดือน' && parts.monthlyPrice) basePrice = parseFloat(parts.monthlyPrice);
+                        else if (subText === 'รายเดือน') basePrice = 900;
+                    }
+                    const finalPrice = isOneWay && !subText ? basePrice / 2 : basePrice;
+
+                    return (
+                      <div key={b.id} className="bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm space-y-4 transition-all hover:shadow-xl">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <h4 className="font-black text-blue-900 text-lg italic uppercase tracking-tighter">{route?.name || "สายรถที่เลือก"}</h4>
+                            <div className="flex flex-wrap gap-2 mt-2">
+                              <span className="text-[10px] text-slate-500 font-bold uppercase bg-slate-50 px-3 py-1 rounded-lg border">{getTripTypeText(tType)} {subText && `(${subText})`}</span>
+                              <span className="text-[10px] text-indigo-600 font-bold uppercase bg-indigo-50 px-3 py-1 rounded-lg border border-indigo-100 flex items-center gap-1">{Calendar && <Calendar className="w-3 h-3"/>} {route?.trip_date || "N/A"}</span>
+                              {route?.price && <span className="text-[10px] text-green-600 font-bold uppercase bg-green-50 px-3 py-1 rounded-lg border border-green-100 flex items-center gap-1">{Banknote && <Banknote className="w-3 h-3"/>} {finalPrice}฿</span>}
+                            </div>
+                            {pickup && <p className="text-[10px] text-blue-600 font-black mt-2 bg-blue-50 inline-block px-2 py-0.5 rounded border border-blue-100">จุดรับ: {pickup}</p>}
+                          </div>
+                          <div className="flex gap-2 items-start">
+                            <span className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${b.status === 'Approved' ? 'bg-green-100 text-green-700 border border-green-200' : b.status === 'Pending' ? 'bg-yellow-100 text-yellow-700 border border-yellow-200' : 'bg-red-50 text-red-700 border border-red-100'}`}>
+                              {b.status === 'Approved' ? '✅ อนุมัติแล้ว' : b.status === 'Pending' ? '⏳ รอยืนยัน' : '❌ ปฏิเสธ'}
+                            </span>
+                            <button onClick={() => cancelBooking(b.id)} className="p-3 bg-slate-50 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all border border-slate-200 shadow-sm" title="ยกเลิกการจอง">{Trash2 && <Trash2 className="w-5 h-5" />}</button>
+                          </div>
+                        </div>
+
+                        {/* REAL LIVE GPS MAP */}
+                        {b.status === 'Approved' && (
+                          <div className="pt-4 border-t border-slate-50">
+                            <div className="flex items-center justify-between mb-4">
+                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
+                                    {Navigation && <Navigation className="w-4 h-4 text-blue-600 animate-pulse" />} Live GPS Tracking
+                                </p>
+                            </div>
+                            <RealLiveMap rawData={route?.car_model} forEmployee={true} vehicleType={route?.vehicle_type} />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {myBookings.filter(b => b.status !== 'Archived' && b.status !== 'Cancelled').length === 0 && <div className="p-24 text-center bg-white rounded-[3rem] border-2 border-dashed border-slate-200 text-slate-300 font-black italic uppercase tracking-widest">No Active Trip Found</div>}
+            </section>
+          </div>
+        )}
+
+        {}
+        {/* ADMIN DASHBOARD */}
+        {view === 'admin-dash' && (
+          <div className="space-y-6 animate-in fade-in duration-500">
+            <div className="flex justify-between items-center px-2">
+                <h2 className="text-2xl font-black flex items-center gap-3 text-slate-800 uppercase italic">{ShieldCheck && <ShieldCheck className="w-8 h-8 text-blue-700" />} Admin Monitor</h2>
+            </div>
+            
+            {/* Admin Tabs */}
+            <div className="flex gap-2 bg-slate-200 p-1.5 rounded-2xl">
+               <button onClick={()=>setAdminTab('active')} className={`flex-1 py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${adminTab==='active'?'bg-white text-blue-700 shadow-sm':'text-slate-500 hover:bg-slate-300'}`}>รายการปัจจุบัน</button>
+               <button onClick={()=>setAdminTab('history')} className={`flex-1 py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${adminTab==='history'?'bg-white text-slate-700 shadow-sm':'text-slate-500 hover:bg-slate-300'}`}>ประวัติย้อนหลัง</button>
+            </div>
+
+            {/* Export Button for History Tab */}
+            {adminTab === 'history' && (
+              <div className="flex justify-end px-2">
+                 <button onClick={exportToExcel} className="bg-emerald-600 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2 hover:bg-emerald-700 transition-colors">
+                    {Download && <Download className="w-4 h-4" />} ดาวน์โหลด Excel (CSV)
+                 </button>
+              </div>
+            )}
+
+            <section className="space-y-3">
+               {allBookings
+                 .filter(b => {
+                    const route = routes.find(r => String(r.id) === String(b.route_id));
+                    const { isArchived } = getCarModelParts(route?.car_model);
+                    const isPast = route ? (route.trip_date < getTodayDateStr() || isArchived) : true; 
+                    const isArchivedStatus = b.status === 'Cancelled' || b.status === 'Archived';
+                    
+                    if (adminTab === 'active') return !isPast && !isArchivedStatus;
+                    else return isPast || isArchivedStatus;
+                 })
+                 .map(b => {
+                 const route = routes.find(r => String(r.id) === String(b.route_id));
+                 const { type: tType, pickup, subText } = parseTripData(b.trip_type);
+
+                 return (
+                    <div key={b.id} className={`p-5 rounded-[2rem] border shadow-sm flex flex-wrap justify-between items-center gap-4 transition-all ${adminTab==='history' ? 'bg-slate-50 opacity-80' : 'bg-white hover:border-blue-100'}`}>
+                        <div className="flex items-center gap-3">
+                           <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-lg ${adminTab==='history'?'bg-slate-200 text-slate-400':'bg-blue-100 text-blue-600'}`}>{b.passenger_name?.[0]}</div>
+                           <div>
+                              <p className="font-bold text-sm text-slate-800">{b.passenger_name}</p>
+                              <div className="flex items-center gap-2 mt-1">
+                                <p className="text-[9px] text-slate-500 font-black uppercase tracking-widest">{Phone && <Phone className="w-3 h-3 inline"/>} {b.passenger_phone}</p>
+                                <p className="text-[9px] text-indigo-500 font-black uppercase bg-indigo-50 px-2 py-0.5 rounded-md">{route?.trip_date || "N/A"}</p>
+                                <p className="text-[9px] text-slate-400 font-black uppercase border px-2 py-0.5 rounded-md">{getTripTypeText(tType)} {subText && `(${subText})`}</p>
+                              </div>
+                              {pickup && <p className="text-[9px] text-blue-600 font-black mt-1 bg-blue-50 inline-block px-2 py-0.5 rounded">จุดรับ: {pickup}</p>}
+                           </div>
+                        </div>
+                        <div className="flex gap-2 items-center">
+                           <span className={`text-[9px] font-black uppercase tracking-widest px-3 py-1.5 rounded-lg ${b.status==='Approved'?'bg-green-100 text-green-700':b.status==='Pending'?'bg-yellow-100 text-yellow-700':'bg-slate-200 text-slate-500'}`}>{b.status === 'Approved' ? '✅ อนุมัติแล้ว' : b.status}</span>
+                           {adminTab === 'active' && (
+                             <>
+                               <button onClick={() => updateBookingStatus(b.id, 'Approved')} className="p-2 bg-green-50 text-green-600 rounded-lg hover:bg-green-600 hover:text-white">{CheckCircle && <CheckCircle className="w-4 h-4"/>}</button>
+                               <button onClick={() => updateBookingStatus(b.id, 'Rejected')} className="p-2 bg-red-50 text-red-500 rounded-lg hover:bg-red-500 hover:text-white">{X && <X className="w-4 h-4"/>}</button>
+                               <button onClick={() => cancelBooking(b.id)} className="p-2 bg-slate-100 text-slate-400 rounded-lg hover:bg-red-50 hover:text-red-500">{Trash2 && <Trash2 className="w-4 h-4"/>}</button>
+                             </>
+                           )}
+                        </div>
+                    </div>
+                 )
+               })}
+               {allBookings.filter(b => {
+                    const route = routes.find(r => String(r.id) === String(b.route_id));
+                    const { isArchived } = getCarModelParts(route?.car_model);
+                    const isPast = route ? (route.trip_date < getTodayDateStr() || isArchived) : true;
+                    const isArchivedStatus = b.status === 'Cancelled' || b.status === 'Archived';
+                    return adminTab === 'active' ? (!isPast && !isArchivedStatus) : (isPast || isArchivedStatus);
+                 }).length === 0 && (
+                 <div className="p-16 text-center text-slate-400 font-bold bg-white rounded-3xl border border-dashed">ไม่พบข้อมูลในหมวดหมู่นี้</div>
+               )}
+            </section>
+          </div>
+        )}
+
+        {}
+        {/* BOOKING LIST VIEW (SEARCH BY DATE) */}
+        {view === 'booking' && (
+          <div className="space-y-6">
+            <h2 className="text-2xl font-black text-blue-900 py-2 flex items-center gap-3 italic uppercase tracking-tighter">
+               <button onClick={()=>setView('user-dash')} className="p-2 bg-white rounded-full border shadow-sm transition-transform active:scale-90">{ChevronLeft && <ChevronLeft className="w-5 h-5"/>}</button> ค้นหาสายรถ
+            </h2>
+            
+            {/* Search Filter Box */}
+            <div className="bg-white p-6 rounded-[2.5rem] border shadow-lg">
+                <label className="text-xs font-black text-slate-500 uppercase tracking-widest ml-2 flex items-center gap-2 mb-2">{Calendar && <Calendar className="w-4 h-4"/>} เลือกวันที่ต้องการเดินทาง (จองล่วงหน้า 1 วันขึ้นไป)</label>
+                <input 
+                  type="date" 
+                  min={getFutureDateStr(1)} 
+                  value={searchDate} 
+                  onChange={(e) => setSearchDate(e.target.value)}
+                  className="w-full bg-blue-50 text-blue-700 text-lg font-black px-6 py-4 rounded-2xl outline-none border-2 border-blue-100 focus:border-blue-400"
+                />
+            </div>
+
+            <div className="space-y-4">
+              {routes.filter(r => r.trip_date === searchDate && !getCarModelParts(r.car_model).isArchived).map(r => {
+                const available = getSeats(r);
+                const { busPackage } = getCarModelParts(r.car_model);
+                
+                return (
+                  <div key={r.id} className="bg-white rounded-[2.5rem] p-6 border shadow-sm hover:border-blue-500 transition-all cursor-pointer group" onClick={()=>{setSelectedRoute(r); setShowModal(true);}}>
+                      <div className="flex flex-col sm:flex-row gap-5">
+                        <div className="flex gap-2 shrink-0">
+                          <div className="bg-blue-600 text-white w-14 h-14 rounded-2xl flex flex-col items-center justify-center font-black shadow-lg shadow-blue-100 text-[10px]"><span className="opacity-70 text-[7px] uppercase tracking-tighter">ไป</span>{r.departure_time}</div>
+                          <div className="bg-indigo-500 text-white w-14 h-14 rounded-2xl flex flex-col items-center justify-center font-black shadow-lg shadow-indigo-100 text-[10px]"><span className="opacity-70 text-[7px] uppercase tracking-tighter">กลับ</span>{r.return_time}</div>
+                        </div>
+                        <div className="flex-1">
+                          <h3 className="font-black text-slate-800 text-base group-hover:text-blue-700 transition-colors uppercase italic tracking-tight flex items-center gap-2">
+                             {r.name}
+                             <span className="text-[9px] bg-slate-100 text-slate-500 px-2 py-1 rounded-md not-italic flex items-center gap-1">{getVehicleIcon(r.vehicle_type)} {r.vehicle_type}</span>
+                          </h3>
+                          <p className="text-[10px] text-slate-500 font-bold mt-1 uppercase tracking-[0.15em]">Plate: {r.plate_number} | Driver: {r.driver_name}</p>
+                          <div className="mt-4 flex items-center justify-between">
+                            <div className="flex gap-3 items-center">
+                               <span className={`text-[10px] font-black px-4 py-2 rounded-xl uppercase tracking-widest ${available <= 0 ? 'bg-red-50 text-red-500 border border-red-100' : 'bg-blue-50 text-blue-600 border border-blue-100'}`}>{available <= 0 ? 'FULL' : `ว่าง ${available} Seats`}</span>
+                               <span className="text-xs font-black text-green-600 flex items-center gap-1">
+                                  {Banknote && <Banknote className="w-4 h-4"/>} {r.price || 0} ฿ {r.vehicle_type === 'รถบัส' && <span className="text-[9px] font-bold text-slate-400">({busPackage === 'monthly' ? 'รายเดือน' : 'รายสัปดาห์'})</span>}
+                               </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                  </div>
+                )
+              })}
+              {routes.filter(r => r.trip_date === searchDate && !getCarModelParts(r.car_model).isArchived).length === 0 && (
+                 <div className="text-center p-12 bg-slate-100 rounded-[3rem] border border-dashed text-slate-400 font-bold">ไม่พบสายรถบริการในวันที่คุณเลือก</div>
+              )}
+            </div>
+          </div>
+        )}
+      </main>
+
+      {}
+      {/* --- MODAL: CONFIRM BOOKING --- */}
+      {showModal && (() => {
+        let displayPrice = selectedRoute?.price || 0;
+        const { busPackage } = getCarModelParts(selectedRoute?.car_model);
+        
+        if (bookingTripType === 'one-way' && selectedRoute?.vehicle_type !== 'รถบัส') {
+            displayPrice = displayPrice / 2;
+        }
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-2xl animate-in zoom-in-95">
+            <div className="bg-white rounded-[3.5rem] w-full max-w-sm overflow-hidden shadow-2xl">
+              <div className="bg-blue-600 p-10 text-white text-center">
+                 <h3 className="text-3xl font-black mb-1 italic tracking-tighter">ยืนยันการจอง</h3>
+                 <p className="text-[10px] font-bold text-blue-100 uppercase tracking-[0.25em] leading-none mt-2 italic">{selectedRoute?.name}</p>
+                 <p className="text-sm font-black text-yellow-300 mt-2 bg-blue-800/30 inline-block px-3 py-1 rounded-full">{Calendar && <Calendar className="w-3 h-3 inline"/>} วันที่: {selectedRoute?.trip_date}</p>
+              </div>
+              <div className="p-8 space-y-6 max-h-[60vh] overflow-y-auto">
+                <div className="grid grid-cols-2 gap-4">
+                  <button onClick={()=>setBookingTripType('one-way')} className={`py-6 rounded-[2rem] text-[10px] font-black flex flex-col items-center gap-2 transition-all shadow-md ${bookingTripType==='one-way'?'bg-blue-700 text-white border-4 border-blue-400 shadow-blue-200':'bg-slate-50 text-slate-400 border'}`}>{ArrowRight && <ArrowRight className="w-6 h-6" />} ขาไปอย่างเดียว</button>
+                  <button onClick={()=>setBookingTripType('round-trip')} className={`py-6 rounded-[2rem] text-[10px] font-black flex flex-col items-center gap-2 transition-all shadow-md ${bookingTripType==='round-trip'?'bg-indigo-700 text-white border-4 border-indigo-400 shadow-indigo-200':'bg-slate-50 text-slate-400 border'}`}>{ArrowRightLeft && <ArrowRightLeft className="w-6 h-6" />} ไปและกลับ</button>
+                </div>
+
+                <div className="space-y-1 mt-4">
+                   <label className="text-[9px] font-black text-slate-500 uppercase ml-2">ระบุจุดที่จะขึ้นรถ (เพื่อให้คนขับทราบ)</label>
+                   <input type="text" placeholder="เช่น หน้าหมู่บ้าน, ปากซอย..." className="w-full bg-slate-50 border-2 rounded-2xl px-4 py-3 text-sm font-bold outline-none focus:border-blue-400" value={pickupLocationStr} onChange={(e) => setPickupLocationStr(e.target.value)} />
+                </div>
+
+                <div className="bg-slate-50 p-4 rounded-2xl flex justify-between items-center border border-slate-100">
+                   <div>
+                     <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
+                       ค่าโดยสาร <span className="text-blue-500">{bookingTripType === 'one-way' && selectedRoute?.vehicle_type !== 'รถบัส' ? '(ขาเดียว)' : ''}</span>
+                     </span>
+                     {selectedRoute?.vehicle_type === 'รถบัส' && (
+                        <p className="text-[9px] text-indigo-600 font-bold mt-1 bg-indigo-50 inline-block px-2 py-1 rounded">
+                           แพ็กเกจ: {busPackage === 'monthly' ? 'รายเดือน' : 'รายสัปดาห์'}
+                        </p>
+                     )}
+                   </div>
+                   <span className="text-2xl font-black text-green-600">
+                     {displayPrice} ฿
+                   </span>
+                </div>
+
+                <button onClick={()=>submitBooking(selectedRoute)} disabled={loading} className="w-full bg-blue-700 text-white py-5 rounded-[2rem] font-black shadow-2xl text-[12px] uppercase tracking-[0.2em] active:scale-95 transition-transform">{loading ? "PROCESSING..." : "CONFIRM BOOKING"}</button>
+                <button onClick={()=>{setShowModal(false); setPickupLocationStr('');}} className="w-full text-slate-400 text-[10px] font-black uppercase pt-2 tracking-widest hover:text-red-500 transition-colors">ยกเลิกรายการ</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {}
+      {/* --- MODAL: ADD DRIVER TRIP --- */}
+      {showAddTripModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-2xl animate-in zoom-in-95">
+          <div className="bg-white rounded-[3rem] w-full max-w-sm overflow-hidden shadow-2xl p-8 space-y-4 max-h-[90vh] overflow-y-auto">
+             <h3 className="text-2xl font-black text-slate-800 mb-4 flex items-center gap-2">{CopyPlus && <CopyPlus className="w-6 h-6 text-blue-600" />} เพิ่มรอบเดินรถใหม่</h3>
+             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-4">กำหนดวันเดินทางของรอบใหม่โดยใช้ข้อมูลรถเดิมของคุณ</p>
+             
+             <div className="space-y-1">
+                <label className="text-[9px] font-black text-slate-500 uppercase ml-2">วันที่ออกเดินทาง (จองล่วงหน้า)</label>
+                <input type="date" min={getTodayDateStr()} className="w-full bg-slate-50 border-2 rounded-2xl px-5 py-4 text-sm font-bold outline-none focus:border-blue-400" value={drvReg.tripDate} onChange={(e)=>setDrvReg({...drvReg, tripDate: e.target.value})} />
+             </div>
+             
+             <div className="grid grid-cols-2 gap-4 pt-2">
+                <div className="space-y-1"><label className="text-[9px] font-black text-slate-500 uppercase ml-2">เวลาขาไป</label><input type="time" className="w-full bg-slate-50 border-2 rounded-2xl px-4 py-3 text-sm font-bold outline-none" value={drvReg.depTime} onChange={(e)=>setDrvReg({...drvReg, depTime: e.target.value})} /></div>
+                <div className="space-y-1"><label className="text-[9px] font-black text-slate-500 uppercase ml-2">เวลากลับ</label><input type="time" className="w-full bg-slate-50 border-2 rounded-2xl px-4 py-3 text-sm font-bold outline-none" value={drvReg.retTime} onChange={(e)=>setDrvReg({...drvReg, retTime: e.target.value})} /></div>
+             </div>
+             
+             {drvReg.vehicleType !== 'รถบัส' ? (
+                 <div className="space-y-1 pt-2">
+                    <label className="text-[9px] font-black text-slate-500 uppercase ml-2">ค่าโดยสารรายวัน (บาท)</label>
+                    <input type="number" className="w-full bg-slate-50 border-2 rounded-2xl px-5 py-4 text-sm font-bold outline-none focus:border-blue-400" value={drvReg.price} onChange={(e)=>setDrvReg({...drvReg, price: e.target.value})} />
+                 </div>
+             ) : (
+                <div className="col-span-2 grid gap-4 bg-indigo-50 p-4 rounded-2xl border border-indigo-100 mt-2">
+                   <div className="space-y-1">
+                      <label className="text-[9px] font-black text-indigo-500 uppercase ml-2">รูปแบบค่าโดยสาร (รถบัส)</label>
+                      <select 
+                        className="w-full bg-white rounded-2xl px-4 py-3 text-sm font-bold outline-none focus:border-indigo-400"
+                        value={drvReg.busPackage || 'weekly'}
+                        onChange={(e)=>setDrvReg({...drvReg, busPackage: e.target.value})}
+                      >
+                        <option value="weekly">รายสัปดาห์ (225 บาท)</option>
+                        <option value="monthly">รายเดือน (900 บาท)</option>
+                      </select>
+                   </div>
+                   <p className="text-[10px] text-indigo-600 font-bold ml-2">
+                     * วันที่สิ้นสุดรอบเหมาจ่าย: {getEndDateStr(drvReg.tripDate, drvReg.busPackage === 'monthly' ? 30 : 7)}
+                   </p>
+                </div>
+             )}
+
+             <div className="pt-4">
+                <button onClick={handleDrvReg} disabled={loading} className="w-full bg-blue-600 text-white py-4 rounded-[1.5rem] font-black shadow-xl active:scale-95 transition-transform">{loading ? "กำลังบันทึก..." : "ยืนยันเพิ่มรอบรถ"}</button>
+                <button onClick={()=>setShowAddTripModal(false)} className="w-full text-slate-400 text-[10px] font-black uppercase mt-4 hover:text-red-500 transition-colors">ยกเลิก</button>
+             </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ตรวจสอบและเรนเดอร์ React App เมื่อโหลดเสร็จ
+if (window.lucideReact) {
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+} else {
+    // กำหนด Timeout เพื่อรอ Lucide โหลดเสร็จ (เผื่ออินเทอร์เน็ตช้า)
+    setTimeout(() => {
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    }, 1000);
+}
+  </script>
+</body>
+</html>
